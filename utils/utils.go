@@ -34,7 +34,7 @@ func Go(f func() error) chan error {
 // Request a given URL and return an io.Reader
 func Download(url string, stderr io.Writer) (*http.Response, error) {
 	var resp *http.Response
-	var err error = nil
+	var err error
 	if resp, err = http.Get(url); err != nil {
 		return nil, err
 	}
@@ -70,7 +70,7 @@ type progressReader struct {
 	readProgress int           // How much has been read so far (bytes)
 	lastUpdate   int           // How many bytes read at least update
 	template     string        // Template to print. Default "%v/%v (%v)"
-	sf *StreamFormatter
+	sf           *StreamFormatter
 }
 
 func (r *progressReader) Read(p []byte) (n int, err error) {
@@ -103,7 +103,7 @@ func (r *progressReader) Close() error {
 	return io.ReadCloser(r.reader).Close()
 }
 func ProgressReader(r io.ReadCloser, size int, output io.Writer, template []byte, sf *StreamFormatter) *progressReader {
-      	tpl := string(template)
+	tpl := string(template)
 	if tpl == "" {
 		tpl = string(sf.FormatProgress("", "%v/%v (%v)"))
 	}
@@ -133,6 +133,20 @@ func HumanDuration(d time.Duration) string {
 		return fmt.Sprintf("%d months", hours/24/30)
 	}
 	return fmt.Sprintf("%d years", d.Hours()/24/365)
+}
+
+// HumanSize returns a human-readable approximation of a size
+// using SI standard (eg. "44kB", "17MB")
+func HumanSize(size int64) string {
+	i := 0
+	var sizef float64
+	sizef = float64(size)
+	units := []string{"B", "kB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB"}
+	for sizef >= 1000.0 {
+		sizef = sizef / 1000.0
+		i++
+	}
+	return fmt.Sprintf("%.4g %s", sizef, units[i])
 }
 
 func Trunc(s string, maxlen int) string {
@@ -349,11 +363,11 @@ func (idx *TruncIndex) Get(s string) (string, error) {
 	return string(idx.bytes[before:after]), err
 }
 
-// TruncateId returns a shorthand version of a string identifier for convenience.
+// TruncateID returns a shorthand version of a string identifier for convenience.
 // A collision with other shorthands is very unlikely, but possible.
 // In case of a collision a lookup with TruncIndex.Get() will fail, and the caller
 // will need to use a langer prefix, or the full-length Id.
-func TruncateId(id string) string {
+func TruncateID(id string) string {
 	shortLen := 12
 	if len(id) < shortLen {
 		shortLen = len(id)
@@ -534,6 +548,7 @@ func GetKernelVersion() (*KernelVersionInfo, error) {
 	}, nil
 }
 
+// FIXME: this is deprecated by CopyWithTar in archive.go
 func CopyDirectory(source, dest string) error {
 	if output, err := exec.Command("cp", "-ra", source, dest).CombinedOutput(); err != nil {
 		return fmt.Errorf("Error copy: %s (%s)", err, output)
@@ -566,7 +581,7 @@ func NewWriteFlusher(w io.Writer) *WriteFlusher {
 	return &WriteFlusher{w: w, flusher: flusher}
 }
 
-type JsonMessage struct {
+type JSONMessage struct {
 	Status   string `json:"status,omitempty"`
 	Progress string `json:"progress,omitempty"`
 	Error    string `json:"error,omitempty"`
@@ -585,7 +600,7 @@ func (sf *StreamFormatter) FormatStatus(format string, a ...interface{}) []byte 
 	sf.used = true
 	str := fmt.Sprintf(format, a...)
 	if sf.json {
-		b, err := json.Marshal(&JsonMessage{Status:str});
+		b, err := json.Marshal(&JSONMessage{Status: str})
 		if err != nil {
 			return sf.FormatError(err)
 		}
@@ -597,7 +612,7 @@ func (sf *StreamFormatter) FormatStatus(format string, a ...interface{}) []byte 
 func (sf *StreamFormatter) FormatError(err error) []byte {
 	sf.used = true
 	if sf.json {
-		if b, err := json.Marshal(&JsonMessage{Error:err.Error()}); err == nil {
+		if b, err := json.Marshal(&JSONMessage{Error: err.Error()}); err == nil {
 			return b
 		}
 		return []byte("{\"error\":\"format error\"}")
@@ -608,10 +623,10 @@ func (sf *StreamFormatter) FormatError(err error) []byte {
 func (sf *StreamFormatter) FormatProgress(action, str string) []byte {
 	sf.used = true
 	if sf.json {
-		b, err := json.Marshal(&JsonMessage{Progress:str})
+		b, err := json.Marshal(&JSONMessage{Status: action, Progress: str})
 		if err != nil {
-                        return nil
-                }
+			return nil
+		}
 		return b
 	}
 	return []byte(action + " " + str + "\r")
@@ -619,4 +634,21 @@ func (sf *StreamFormatter) FormatProgress(action, str string) []byte {
 
 func (sf *StreamFormatter) Used() bool {
 	return sf.used
+}
+
+func CheckLocalDns() bool {
+	resolv, err := ioutil.ReadFile("/etc/resolv.conf")
+	if err != nil {
+		Debugf("Error openning resolv.conf: %s", err)
+		return false
+	}
+	for _, ip := range []string{
+		"127.0.0.1",
+		"127.0.1.1",
+	} {
+		if strings.Contains(string(resolv), ip) {
+			return true
+		}
+	}
+	return false
 }

@@ -13,12 +13,13 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"strings"
 	"time"
 )
 
 type Image struct {
-	Id              string    `json:"id"`
+	ID              string    `json:"id"`
 	Parent          string    `json:"parent,omitempty"`
 	Comment         string    `json:"comment,omitempty"`
 	Created         time.Time `json:"created"`
@@ -29,6 +30,7 @@ type Image struct {
 	Config          *Config   `json:"config,omitempty"`
 	Architecture    string    `json:"architecture,omitempty"`
 	graph           *Graph
+	Size            int64
 }
 
 func LoadImage(root string) (*Image, error) {
@@ -42,18 +44,17 @@ func LoadImage(root string) (*Image, error) {
 	if err := json.Unmarshal(jsonData, img); err != nil {
 		return nil, err
 	}
-	if err := ValidateId(img.Id); err != nil {
+	if err := ValidateID(img.ID); err != nil {
 		return nil, err
 	}
 	// Check that the filesystem layer exists
 	if stat, err := os.Stat(layerPath(root)); err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("Couldn't load image %s: no filesystem layer", img.Id)
-		} else {
-			return nil, err
+			return nil, fmt.Errorf("Couldn't load image %s: no filesystem layer", img.ID)
 		}
+		return nil, err
 	} else if !stat.IsDir() {
-		return nil, fmt.Errorf("Couldn't load image %s: %s is not a directory", img.Id, layerPath(root))
+		return nil, fmt.Errorf("Couldn't load image %s: %s is not a directory", img.ID, layerPath(root))
 	}
 	return img, nil
 }
@@ -61,7 +62,7 @@ func LoadImage(root string) (*Image, error) {
 func StoreImage(img *Image, layerData Archive, root string, store bool) error {
 	// Check that root doesn't already exist
 	if _, err := os.Stat(root); err == nil {
-		return fmt.Errorf("Image %s already exists", img.Id)
+		return fmt.Errorf("Image %s already exists", img.ID)
 	} else if !os.IsNotExist(err) {
 		return err
 	}
@@ -95,6 +96,18 @@ func StoreImage(img *Image, layerData Archive, root string, store bool) error {
 	if err := Untar(layerData, layer); err != nil {
 		return err
 	}
+
+	return StoreSize(img, root)
+}
+
+func StoreSize(img *Image, root string) error {
+	layer := layerPath(root)
+
+	filepath.Walk(layer, func(path string, fileInfo os.FileInfo, err error) error {
+		img.Size += fileInfo.Size()
+		return nil
+	})
+
 	// Store the json ball
 	jsonData, err := json.Marshal(img)
 	if err != nil {
@@ -126,6 +139,8 @@ func MountAUFS(ro []string, rw string, target string) error {
 		roBranches += fmt.Sprintf("%v=ro+wh:", layer)
 	}
 	branches := fmt.Sprintf("br:%v:%v", rwBranch, roBranches)
+
+	branches += ",xino=/dev/shm/aufs.xino"
 
 	//if error, try to load aufs kernel module
 	if err := mount("none", target, "aufs", 0, branches); err != nil {
@@ -181,11 +196,11 @@ func (image *Image) Changes(rw string) ([]Change, error) {
 	return Changes(layers, rw)
 }
 
-func (image *Image) ShortId() string {
-	return utils.TruncateId(image.Id)
+func (image *Image) ShortID() string {
+	return utils.TruncateID(image.ID)
 }
 
-func ValidateId(id string) error {
+func ValidateID(id string) error {
 	if id == "" {
 		return fmt.Errorf("Image id can't be empty")
 	}
@@ -195,7 +210,7 @@ func ValidateId(id string) error {
 	return nil
 }
 
-func GenerateId() string {
+func GenerateID() string {
 	id := make([]byte, 32)
 	_, err := io.ReadFull(rand.Reader, id)
 	if err != nil {
@@ -241,7 +256,7 @@ func (img *Image) layers() ([]string, error) {
 		return nil, e
 	}
 	if len(list) == 0 {
-		return nil, fmt.Errorf("No layer found for image %s\n", img.Id)
+		return nil, fmt.Errorf("No layer found for image %s\n", img.ID)
 	}
 	return list, nil
 }
@@ -276,7 +291,7 @@ func (img *Image) root() (string, error) {
 	if img.graph == nil {
 		return "", fmt.Errorf("Can't lookup root of unregistered image")
 	}
-	return img.graph.imageRoot(img.Id), nil
+	return img.graph.imageRoot(img.ID), nil
 }
 
 // Return the path of an image's layer
@@ -289,8 +304,8 @@ func (img *Image) layer() (string, error) {
 }
 
 func (img *Image) Checksum() (string, error) {
-	img.graph.checksumLock[img.Id].Lock()
-	defer img.graph.checksumLock[img.Id].Unlock()
+	img.graph.checksumLock[img.ID].Lock()
+	defer img.graph.checksumLock[img.ID].Unlock()
 
 	root, err := img.root()
 	if err != nil {
@@ -301,7 +316,7 @@ func (img *Image) Checksum() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if checksum, ok := checksums[img.Id]; ok {
+	if checksum, ok := checksums[img.ID]; ok {
 		return checksum, nil
 	}
 
@@ -352,7 +367,7 @@ func (img *Image) Checksum() (string, error) {
 		return "", err
 	}
 
-	checksums[img.Id] = hash
+	checksums[img.ID] = hash
 
 	// Dump the checksums to disc
 	if err := img.graph.storeChecksums(checksums); err != nil {
@@ -362,8 +377,17 @@ func (img *Image) Checksum() (string, error) {
 	return hash, nil
 }
 
+func (img *Image) getParentsSize(size int64) int64 {
+	parentImage, err := img.GetParent()
+	if err != nil || parentImage == nil {
+		return size
+	}
+	size += parentImage.Size
+	return parentImage.getParentsSize(size)
+}
+
 // Build an Image object from raw json data
-func NewImgJson(src []byte) (*Image, error) {
+func NewImgJSON(src []byte) (*Image, error) {
 	ret := &Image{}
 
 	utils.Debugf("Json string: {%s}\n", src)
